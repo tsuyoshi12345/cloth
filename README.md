@@ -32,6 +32,15 @@ Then connect to the container (replace `cloth-app-1` with your actual container 
 docker exec -it cloth-app-1 /bin/bash
 ```
 
+## Build
+
+Build CLoTH:
+
+```sh
+make build
+```
+
+
 ### 3. Run the simulator
 
 Make sure the `output/` directory exists:
