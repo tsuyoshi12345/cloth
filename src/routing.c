@@ -60,9 +60,30 @@ void initialize_dijkstra(long n_nodes, long n_edges, struct array* payments) {
 
 }
 
+struct array* dijkstra(long source, long target, uint64_t amount, struct network* network, uint64_t current_time, long p, enum pathfind_error *error){
+  struct node* node;
+  struct array* hops;
+
+  node = array_get(network->nodes, source);
+  switch(node->type){
+      case LND:
+        hops = LND_dijkstra(source, target, amount, network, current_time, p, error);
+        break;
+      case CLN:
+        hops = CLN_dijkstra(source, target, amount, network, current_time, p, error);
+        break;
+      default:
+        fprintf(stderr, "ERROR no_type\n");
+        exit(-1);
+  }
+  return hops;
+}
+
 /* a dijkstra thread finds a path for a payment by calling dijkstra */ 
 void* dijkstra_thread(void*arg) {
   struct payment * payment;
+  struct network* network;
+  struct node* node;
   struct array* hops;
   void *data;
   long payment_id;
@@ -74,6 +95,10 @@ void* dijkstra_thread(void*arg) {
     if(jobs == NULL) return NULL;
     pthread_mutex_lock(&jobs_mutex);
     jobs = pop(jobs, &data);
+    if (data == NULL) {
+      printf("data is NULL\n");
+      continue; // dataがNULLの場合は次のループへ
+    }
     payment_id =  *((long*)data);
     pthread_mutex_unlock(&jobs_mutex);
     pthread_mutex_lock(&data_mutex);
@@ -191,6 +216,11 @@ double get_probability(long from_node_id, long to_node_id, uint64_t amount, long
   sender = array_get(network->nodes, sender_id);
   results = sender->results[from_node_id];
 
+  //チャネルの送金成功確率を手動で変更する
+  /*if(from_node_id == 12 && to_node_id == 6 || from_node_id == 6 && to_node_id == 12){
+    return 0.001;
+  }*/
+
   if(from_node_id == sender_id)
     node_probability = PREVSUCCESSPROBABILITY;
   else
@@ -200,18 +230,22 @@ double get_probability(long from_node_id, long to_node_id, uint64_t amount, long
 }
 
 
-uint64_t get_probability_based_dist(double weight, double probability){
+uint64_t LND_get_probability_based_dist(double weight, double probability){
   const double min_probability = 0.00001;
   if(probability < min_probability)
     return INF;
   return weight + ((double) PAYMENTATTEMPTPENALTY)/probability;
 }
 
+uint64_t CLN_get_probability_based_dist(double weight, double probability){
+  return weight;
+}
+
 
 /* END - PROBABILITY FUNCTIONS */
 
-/* compare the distance used in dijkstra */
-int compare_distance(struct distance* a, struct distance* b) {
+/* compare the distance used in CLN_dijkstra */
+int LND_compare_distance(struct distance* a, struct distance* b) {
   uint64_t d1, d2;
   double p1, p2;
   d1=a->distance;
@@ -225,6 +259,21 @@ int compare_distance(struct distance* a, struct distance* b) {
       return -1;
   }
   else if(d1<d2)
+    return -1;
+  else
+    return 1;
+}
+
+/* compare the distance used in CLNdijkstra */
+int CLN_compare_distance(struct distance* a, struct distance* b) {
+  uint64_t d1, d2;
+  double p1, p2;
+  d1=a->distance;
+  d2=b->distance;
+  p1=a->probability;
+  p2=b->probability;
+  
+  if(d1<d2)
     return -1;
   else
     return 1;
@@ -315,6 +364,7 @@ struct array* get_best_edges(long to_node_id, uint64_t amount, long source_node_
     best_edges = array_insert(best_edges, new_best_edge);
   }
 
+
   list_free(explored_nodes);
 
   return best_edges;
@@ -328,7 +378,7 @@ double get_edge_weight(uint64_t amount, uint64_t fee, uint32_t timelock){
 }
 
 /* a modified version of dijkstra to find a path connecting the source (payment sender) to the target (payment receiver) */
-struct array* dijkstra(long source, long target, uint64_t amount, struct network* network, uint64_t current_time, long p, enum pathfind_error *error) {
+struct array* CLN_dijkstra(long source, long target, uint64_t amount, struct network* network, uint64_t current_time, long p, enum pathfind_error *error) {
   struct distance *d=NULL, to_node_dist;
   long i, best_node_id, j, from_node_id, curr;
   struct node *source_node, *best_node;
@@ -352,7 +402,7 @@ struct array* dijkstra(long source, long target, uint64_t amount, struct network
   }
 
   while(heap_len(distance_heap[p])!=0)
-    heap_pop(distance_heap[p], compare_distance);
+    heap_pop(distance_heap[p], CLN_compare_distance);
 
   for(i=0; i<array_len(network->nodes); i++){
     distance[p][i].node = i;
@@ -361,7 +411,7 @@ struct array* dijkstra(long source, long target, uint64_t amount, struct network
     distance[p][i].amt_to_receive = 0;
     distance[p][i].next_edge = -1;
   }
-
+  
   distance[p][target].node = target;
   distance[p][target].amt_to_receive = amount;
   distance[p][target].fee = 0;
@@ -370,11 +420,11 @@ struct array* dijkstra(long source, long target, uint64_t amount, struct network
   distance[p][target].weight = 0;
   distance[p][target].probability = 1;
 
-  distance_heap[p] =  heap_insert_or_update(distance_heap[p], &distance[p][target], compare_distance, is_key_equal);
+  distance_heap[p] =  heap_insert_or_update(distance_heap[p], &distance[p][target], CLN_compare_distance, is_key_equal);
 
   while(heap_len(distance_heap[p])!=0) {
 
-    d = heap_pop(distance_heap[p], compare_distance);
+    d = heap_pop(distance_heap[p], CLN_compare_distance);
     best_node_id = d->node;
     if(best_node_id==source) break;
 
@@ -402,9 +452,9 @@ struct array* dijkstra(long source, long target, uint64_t amount, struct network
       if(amt_to_send < edge->policy.min_htlc)
         continue;
 
-      edge_probability = get_probability(from_node_id, to_node_dist.node, amt_to_send, source, current_time, network);
+      //edge_probability = get_probability(from_node_id, to_node_dist.node, amt_to_send, source, current_time, network);
 
-      if(edge_probability == 0) continue;
+      //if(edge_probability == 0) continue;
 
       edge_fee = 0;
       edge_timelock = 0;
@@ -418,27 +468,27 @@ struct array* dijkstra(long source, long target, uint64_t amount, struct network
       tmp_timelock = to_node_dist.timelock + edge_timelock;
       if(tmp_timelock > TIMELOCKLIMIT) continue;
 
-      tmp_probability = to_node_dist.probability*edge_probability;
-      if(tmp_probability < PROBABILITYLIMIT) continue;
+      //tmp_probability = to_node_dist.probability*edge_probability;
+      //if(tmp_probability < PROBABILITYLIMIT) continue;
 
       edge_weight = get_edge_weight(amt_to_receive, edge_fee, edge_timelock);
       tmp_weight = to_node_dist.weight + edge_weight;
-      tmp_dist = get_probability_based_dist(tmp_weight, tmp_probability);
+      tmp_dist = tmp_weight;
 
       current_dist = distance[p][from_node_id].distance;
-      current_prob = distance[p][from_node_id].probability;
-      if(tmp_dist > current_dist) continue;
-      if(tmp_dist == current_dist && tmp_probability <= current_prob) continue;
+      //current_prob = distance[p][from_node_id].probability;
+      if(tmp_dist >= current_dist) continue;
+      //if(tmp_dist == current_dist && tmp_probability <= current_prob) continue;
 
       distance[p][from_node_id].node = from_node_id;
       distance[p][from_node_id].distance = tmp_dist;
       distance[p][from_node_id].weight = tmp_weight;
       distance[p][from_node_id].amt_to_receive = amt_to_receive;
       distance[p][from_node_id].timelock = tmp_timelock;
-      distance[p][from_node_id].probability = tmp_probability;
+      //distance[p][from_node_id].probability = tmp_probability;
       distance[p][from_node_id].next_edge = edge->id;
 
-      distance_heap[p] = heap_insert_or_update(distance_heap[p], &distance[p][from_node_id], compare_distance, is_key_equal);
+      distance_heap[p] = heap_insert_or_update(distance_heap[p], &distance[p][from_node_id], CLN_compare_distance, is_key_equal);
     }
     }
 
@@ -457,6 +507,182 @@ struct array* dijkstra(long source, long target, uint64_t amount, struct network
     hops=array_insert(hops, hop);
     curr = edge->to_node_id;
   }
+
+  if(array_len(hops) > HOPSLIMIT){
+    *error = NOPATH;
+    return NULL;
+  }
+
+  return hops;
+}
+
+struct array* LND_dijkstra(long source, long target, uint64_t amount, struct network* network, uint64_t current_time, long p, enum pathfind_error *error) {
+  struct distance *d=NULL, to_node_dist;
+  long i, best_node_id, j, from_node_id, curr;
+  struct node *source_node, *best_node;
+  struct edge* edge=NULL;
+  uint64_t edge_timelock, tmp_timelock;
+  uint64_t  amt_to_send, edge_fee, tmp_dist, amt_to_receive, total_balance, max_balance, current_dist;
+  struct array* hops=NULL; // *best_edges = NULL;
+  struct path_hop* hop=NULL;
+  double edge_probability, tmp_probability, edge_weight, tmp_weight, current_prob;
+  struct channel* channel;
+
+  source_node = array_get(network->nodes, source);
+  get_balance(source_node, &max_balance, &total_balance);
+  if(amount > total_balance){
+    *error = NOLOCALBALANCE;
+    return NULL;
+  }
+  else if(amount > max_balance){
+    *error = NOPATH;
+    return NULL;
+  }
+
+  while(heap_len(distance_heap[p])!=0)
+    heap_pop(distance_heap[p], LND_compare_distance);
+
+  for(i=0; i<array_len(network->nodes); i++){
+    distance[p][i].node = i;
+    distance[p][i].distance = INF;
+    distance[p][i].fee = 0;
+    distance[p][i].amt_to_receive = 0;
+    distance[p][i].next_edge = -1;
+  }
+  
+  distance[p][target].node = target;
+  distance[p][target].amt_to_receive = amount;
+  distance[p][target].fee = 0;
+  distance[p][target].distance = 0;
+  distance[p][target].timelock = FINALTIMELOCK;
+  distance[p][target].weight = 0;
+  distance[p][target].probability = 1;
+
+  distance_heap[p] =  heap_insert_or_update(distance_heap[p], &distance[p][target], LND_compare_distance, is_key_equal);
+
+  while(heap_len(distance_heap[p])!=0) {
+
+    d = heap_pop(distance_heap[p], LND_compare_distance);
+    best_node_id = d->node;
+    if(best_node_id==source) break;
+
+    to_node_dist = distance[p][best_node_id];
+    amt_to_send = to_node_dist.amt_to_receive;
+
+    best_node = array_get(network->nodes, best_node_id);
+    /* best_edges = get_best_edges(best_node_id, amt_to_send, source, network); */
+
+    //printf("node: %ld\n", best_node->id);
+    for(j=0; j<array_len(best_node->open_edges); j++) {
+      edge = array_get(best_node->open_edges, j);
+      edge = array_get(network->edges, edge->counter_edge_id);
+
+      from_node_id = edge->from_node_id;
+      if(from_node_id == source){
+        if(edge->balance < amt_to_send)
+          continue;
+      }
+      else{
+        channel = array_get(network->channels, edge->channel_id);
+        if(channel->capacity < amt_to_send)
+          continue;
+      }
+
+      if(amt_to_send < edge->policy.min_htlc)
+        continue;
+
+      /*if(from_node_id == 5){
+        printf("edge: %ld\n", edge->id);
+        printf("test\n");
+      }*/
+
+      edge_probability = get_probability(from_node_id, to_node_dist.node, amt_to_send, source, current_time, network);
+      if(edge_probability == 0) continue;
+
+      /*if(from_node_id == 5){
+        printf("test2\n");
+      }*/
+
+      edge_fee = 0;
+      edge_timelock = 0;
+      if(from_node_id != source){
+        edge_fee = compute_fee(amt_to_send, edge->policy);
+        edge_timelock = edge->policy.timelock;
+      }
+
+      amt_to_receive = amt_to_send + edge_fee;
+
+      tmp_timelock = to_node_dist.timelock + edge_timelock;
+      if(tmp_timelock > TIMELOCKLIMIT) continue;
+
+      /*if(from_node_id == 5){
+        printf("test3\n");
+      }*/
+
+      tmp_probability = to_node_dist.probability*edge_probability;
+      if(tmp_probability < PROBABILITYLIMIT) continue;
+
+      /*
+      if(from_node_id == 5){
+        printf("test4\n");
+      }*/
+
+      edge_weight = get_edge_weight(amt_to_receive, edge_fee, edge_timelock);
+      tmp_weight = to_node_dist.weight + edge_weight;
+      tmp_dist = LND_get_probability_based_dist(tmp_weight, tmp_probability);
+
+      current_dist = distance[p][from_node_id].distance;
+      current_prob = distance[p][from_node_id].probability;
+      if(tmp_dist > current_dist) continue;
+      /*
+      if(from_node_id == 5){
+        printf("test5\n");
+      }*/
+
+      if(tmp_dist == current_dist && tmp_probability <= current_prob) continue;
+
+      /*if(from_node_id == 5){
+        printf("test6\n");
+      }*/
+
+      distance[p][from_node_id].node = from_node_id;
+      distance[p][from_node_id].distance = tmp_dist;
+      distance[p][from_node_id].weight = tmp_weight;
+      distance[p][from_node_id].amt_to_receive = amt_to_receive;
+      distance[p][from_node_id].timelock = tmp_timelock;
+      distance[p][from_node_id].probability = tmp_probability;
+      distance[p][from_node_id].next_edge = edge->id;
+
+      distance_heap[p] = heap_insert_or_update(distance_heap[p], &distance[p][from_node_id], LND_compare_distance, is_key_equal);
+    }
+    }
+
+  hops = array_initialize(5);
+  curr = source;
+  while(curr!=target) {
+    if(distance[p][curr].next_edge == -1) {
+      *error = NOPATH;
+      return NULL;
+    }
+    hop = malloc(sizeof(struct path_hop));
+    hop->sender = curr;
+    hop->edge = distance[p][curr].next_edge;
+    edge = array_get(network->edges, distance[p][curr].next_edge);
+    hop->receiver = edge->to_node_id;
+    hops=array_insert(hops, hop);
+    curr = edge->to_node_id;
+  }
+
+  /*for(j=0; j<array_len(hops); j++) {
+        hop = array_get(hops, j);
+        if(j==array_len(hops)-1){
+          printf("%ld-", hop->sender);
+          printf("%ld\n",hop->receiver);
+        }else
+          printf("%ld-",hop->sender);
+  }
+  printf("--------------------------\n");
+  */
 
   if(array_len(hops) > HOPSLIMIT){
     *error = NOPATH;

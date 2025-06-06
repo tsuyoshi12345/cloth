@@ -6,6 +6,8 @@
 #include <gsl/gsl_rng.h>
 #include <gsl/gsl_randist.h>
 
+#define BLOCK_UPDATE_TIME 1
+
 
 struct network_params{
   long n_nodes;
@@ -32,5 +34,7 @@ struct simulation{
   struct heap* events;
   gsl_rng* random_generator;
 };
+
+
 
 #endif

@@ -29,6 +29,17 @@ struct array* array_initialize(long size) {
   return a;
 }
 
+struct array* array_swap(struct array *arr, long index, void *new_element) {
+    if (index >= arr->size || index < 0) {
+        printf("Error: Index out of bounds\n");
+        return arr;
+    }
+
+    void *temp = arr->element[index];
+    arr->element[index] = new_element;
+
+    return arr;
+}
 
 struct array* array_insert(struct array* a, void* data) {
   if(a->index >= a->size)

@@ -17,6 +17,8 @@ long array_len(struct array* a);
 
 void array_reverse(struct array* a);
 
+void delete_element(struct array *a, long element_index) ;
+
 void array_delete(struct array* a, void* element,  int(*is_equal)());
 
 void array_delete_all(struct array* a);

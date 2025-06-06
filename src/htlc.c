@@ -17,6 +17,9 @@
 #include "../include/network.h"
 #include "../include/event.h"
 #include "../include/utils.h"
+#include "../include/lease.h"
+
+
 
 /* Functions in this file simulate the HTLC mechanism for exchanging payments, as implemented in the Lightning Network.
    They are a (high-level) copy of functions in lnd-v0.9.1-beta (see files `routing/missioncontrol.go`, `htlcswitch/switch.go`, `htlcswitch/link.go`) */
@@ -201,6 +204,7 @@ struct payment* create_payment_shard(long shard_id, uint64_t shard_amount, struc
 /* find a path for a payment (a modified version of dijkstra is used: see `routing.c`) */
 void find_path(struct event *event, struct simulation* simulation, struct network* network, struct array** payments, unsigned int mpp) {
   struct payment *payment, *shard1, *shard2;
+  struct node* node;
   struct array *path, *shard1_path, *shard2_path;
   uint64_t shard1_amount, shard2_amount;
   enum pathfind_error error;
@@ -213,13 +217,28 @@ void find_path(struct event *event, struct simulation* simulation, struct networ
   if(simulation->current_time > payment->start_time + 60000) {
     payment->end_time = simulation->current_time;
     payment->is_timeout = 1;
+    printf("Payment ID %ld timeout\n", payment->id);
     return;
   }
 
   if (payment->attempts==1)
     path = paths[payment->id];
-  else
-    path = dijkstra(payment->sender, payment->receiver, payment->amount, network, simulation->current_time, 0, &error);
+  else{
+    node = array_get(network->nodes, payment->sender);
+    switch (node->type)
+    {
+    case LND:
+      path = LND_dijkstra(payment->sender, payment->receiver, payment->amount, network, simulation->current_time, 0, &error);
+      break;
+    case CLN:
+      path = CLN_dijkstra(payment->sender, payment->receiver, payment->amount, network, simulation->current_time, 0, &error);
+      break;
+
+    default:
+      printf("find_path error  no node_type\n");
+      exit(-1);
+    }
+  }
 
   if (path != NULL) {
     generate_send_payment_event(payment, path, simulation, network);
@@ -230,14 +249,44 @@ void find_path(struct event *event, struct simulation* simulation, struct networ
   if(mpp && path == NULL && !(payment->is_shard) && payment->attempts == 1 ){
     shard1_amount = payment->amount/2;
     shard2_amount = payment->amount - shard1_amount;
-    shard1_path = dijkstra(payment->sender, payment->receiver, shard1_amount, network, simulation->current_time, 0, &error);
+    node = array_get(network->nodes, payment->sender);
+    switch (node->type)
+    {
+    case LND:
+      shard1_path = LND_dijkstra(payment->sender, payment->receiver, shard1_amount, network, simulation->current_time, 0, &error);
+      break;
+    case CLN:
+      shard1_path = CLN_dijkstra(payment->sender, payment->receiver, shard1_amount, network, simulation->current_time, 0, &error);
+      break;
+
+    default:
+      printf("find_path error  no node_type\n");
+      exit(-1);
+    }
     if(shard1_path == NULL){
       payment->end_time = simulation->current_time;
+      printf("no_path\n");
       return;
     }
-    shard2_path = dijkstra(payment->sender, payment->receiver, shard2_amount, network, simulation->current_time, 0, &error);
+
+    switch (node->type)
+    {
+    case LND:
+      shard2_path = LND_dijkstra(payment->sender, payment->receiver, shard2_amount, network, simulation->current_time, 0, &error);
+      break;
+    case CLN:
+      shard2_path = CLN_dijkstra(payment->sender, payment->receiver, shard2_amount, network, simulation->current_time, 0, &error);
+
+      break;
+
+    default:
+      printf("find_path error  no node_type\n");
+      exit(-1);
+    }
+
     if(shard2_path == NULL){
       payment->end_time = simulation->current_time;
+      printf("no_shard2_path\n");
       return;
     }
     shard1_id = array_len(*payments);
@@ -255,6 +304,7 @@ void find_path(struct event *event, struct simulation* simulation, struct networ
   }
 
   payment->end_time = simulation->current_time;
+  printf("payment ID %ld find_path_end\n", payment->id);
   return;
 }
 
@@ -434,6 +484,13 @@ void receive_payment(struct event* event, struct simulation* simulation, struct 
 
   backward_edge->balance += last_route_hop->amount_to_forward;
 
+  //ネットワーク全体のチャネルの割合を確認
+  check_liquidity_network(network);
+  //チャネルが傾いていれば、チャネルを新規開設する
+  if(node->type == 1 && check_liquidity(backward_edge, network, node->lease_threshold)){
+    open_lease_channel(network, node, backward_edge, simulation->random_generator);
+  }
+
   payment->is_success = 1;
 
   prev_node_id = last_route_hop->from_node_id;
@@ -467,6 +524,13 @@ void forward_success(struct event* event, struct simulation* simulation, struct 
 
   backward_edge->balance += prev_hop->amount_to_forward;
 
+  //ネットワーク全体のチャネルの割合を確認
+  check_liquidity_network(network);
+  //チャネルが傾いていれば、チャネルを新規開設する
+  if(node->type == 1 && check_liquidity(backward_edge, network, node->lease_threshold)){
+    open_lease_channel(network, node, backward_edge, simulation->random_generator);
+  }
+
   prev_node_id = prev_hop->from_node_id;
   event_type = prev_node_id == payment->sender ? RECEIVESUCCESS : FORWARDSUCCESS;
   next_event_time = simulation->current_time + 100 + gsl_ran_ugaussian(simulation->random_generator);//prev_channel->latency;
@@ -481,6 +545,8 @@ void receive_success(struct event* event, struct simulation *simulation, struct 
   payment = event->payment;
   node = array_get(network->nodes, event->node_id);
   event->payment->end_time = simulation->current_time;
+  printf("payment ID %ld receive_success\n", payment->id);
+
   process_success_result(node, payment, simulation->current_time);
 }
 
