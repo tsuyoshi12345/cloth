@@ -50,3 +50,35 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+
+# macOS特有のファイル
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Icon must end with two \r
+Icon
+
+# Thumbnails
+._*
+
+# Files that might appear in Finder
+.Trashes
+
+# Spotlight indexing files
+.Spotlight-V100
+.metadata_never_index
+
+# Temporary files created by various apps
+*.swp
+*~
+
+# Xcode関連（もし使用している場合）
+build/
+DerivedData/
+
+# macOSでのボリューム管理用
+.fseventsd
+
+.vscode/
+output/

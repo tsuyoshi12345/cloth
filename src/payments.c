@@ -13,6 +13,7 @@
 #include "../include/payments.h"
 #include "../include/network.h"
 
+
 /* Functions in this file generate the payments that are exchanged in the payment-channel network during the simulation */
 
 

@@ -287,9 +287,84 @@ gsl_rng* initialize_random_generator(){
 }
 
 
+
+//look out csv_lock
+void close_lease_channel(struct channel* lease_channel, struct network* network){
+  struct node* node;
+  struct edge* edge1;
+  struct edge* edge2;
+  struct channel* channel;
+  int i;
+
+  edge1 = array_get(node->open_edges, lease_channel->edge1);
+  edge2 = array_get(node->open_edges, lease_channel->edge2);
+
+  node = array_get(network->nodes, lease_channel->node1);
+  // ノードに入っているリースチャンネルの情報を削除
+  for(i = 0; i < array_len(node->open_leases); i++){
+    channel = array_get(node->open_leases, i);
+    if(lease_channel->node1 == channel->id){
+      delete_element(node->open_leases, i);
+    }
+  }
+
+  if(edge1->from_node_id, node->id){
+    node->available_funds += edge1->balance;
+  }else{
+    exit(1);
+  }
+
+  node = array_get(network->nodes, lease_channel->node2);
+  for(i = 0; i < array_len(node->open_leases); i++){
+    channel = array_get(node->open_leases, i);
+    if(lease_channel->node2 == channel->id){
+      delete_element(node->open_leases, i);
+    }
+  }
+
+  if(edge2->from_node_id, node->id){
+    node->available_funds += edge2->balance;
+  }else{
+    exit(1);
+  }
+
+  channel->is_closed = 1;
+  channel->is_leased = false;
+}
+
+void update_csv_lock(struct network* network){
+  struct channel* channel;
+  int i;
+  long csv_lock, lease_expiry, blockheight;
+
+  for(i = 0; i < array_len(network->channels); i++) {
+    channel = array_get(network->channels, i);
+    if(channel->is_leased){
+      lease_expiry = channel->lease_expiry;
+      blockheight = network->block_height;
+      csv_lock = lease_expiry > blockheight ? lease_expiry - blockheight : 1;
+
+      if(csv_lock == 1){
+        printf("%ld %ld\n", channel->id, csv_lock);
+        channel->is_leased = false;
+        close_lease_channel(channel, network);
+      }
+    }
+  }
+}
+void update_block(struct network* network){
+  struct node* node;
+  struct channel* channel;
+  int i;
+
+  network->block_height++;
+  update_csv_lock(network);
+}
+
+
 int main(int argc, char *argv[]) {
   struct event* event;
-  clock_t  begin, end;
+  clock_t  begin, end, block_start, block_end;
   double time_spent=0.0;
   long time_spent_thread = 0;
   struct network_params net_params;
@@ -333,6 +408,7 @@ int main(int argc, char *argv[]) {
   /* core of the discrete-event simulation: extract next event, advance simulation time, execute the event */
   begin = clock();
   simulation->current_time = 1;
+  clock_gettime(CLOCK_MONOTONIC, &start);
   while(heap_len(simulation->events) != 0) {
     event = heap_pop(simulation->events, compare_event);
     simulation->current_time = event->time;
@@ -362,11 +438,17 @@ int main(int argc, char *argv[]) {
       receive_fail(event, simulation, network);
       break;
     case OPENCHANNEL:
-      open_channel(network, simulation->random_generator);
+      //open_channel(network, simulation->random_generator);
       break;
     default:
       printf("ERROR wrong event type\n");
       exit(-1);
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &finish);
+    if( (finish.tv_sec - start.tv_sec) > BLOCK_UPDATE_TIME){
+      update_block(network);
+      clock_gettime(CLOCK_MONOTONIC, &start);
     }
   }
   end = clock();
